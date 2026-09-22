@@ -2,11 +2,13 @@ from pathlib import Path
 import chromadb
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from tavily import TavilyClient
 from langchain_core.tools import tool
 
 CHROMA_PATH = "./chroma_db"
 embedding_fn = DefaultEmbeddingFunction()
 client = chromadb.PersistentClient(path=CHROMA_PATH)
+tavily_client = TavilyClient()
 
 _indexed_paths = set()
 
@@ -57,14 +59,14 @@ def search_codebase(query: str, codebase_path: str) -> str:
 
 @tool
 def search_web(query: str) -> str:
-    """ Search the internet for information. Use this when the question is not
-    related to the code in current repository.
+    """Search the internet for information. Use this when the question
+    is not related to code in the current repository."""
+    response = tavily_client.search(query=query, max_results=3)
 
-    Args:
-        query: search query or question to look up on the web
-    """
-
-    return f"[stub] web search results for '{query}'"
+    output = []
+    for result in response["results"]:
+        output.append(f"[{result['url']}]\n{result['content']}")
+    return "\n---\n".join(output)
 
 tools = [search_codebase, search_web]
 tools_by_name = {t.name: t for t in tools}
