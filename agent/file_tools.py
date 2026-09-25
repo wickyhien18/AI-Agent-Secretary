@@ -1,35 +1,37 @@
 from pathlib import Path
 from langchain_core.tools import tool
 
-# Every read/write operation is confined to this directory.
-# Change this to point at whichever project the agent should inspect.
-BASE_DIR = Path("./workspace").resolve()
-BASE_DIR.mkdir(exist_ok=True)
+# Paths containing any of these names are always denied, even inside
+# an otherwise-allowed codebase_path — prevents the agent from reading
+# its own secrets (.env) or internal data (chroma_db, .git).
+DENIED_NAMES = {".env", "chroma_db", ".git"}
 
 
-def resolve_safe_path(relative_path: str) -> Path:
-    """Resolve relative_path against BASE_DIR and reject anything that
-    escapes it. This is the direct fix for the path-traversal lesson
-    (CVE-2026-34070): never trust a path string on its own, always
-    check where it actually points after resolving '..' segments."""
-    candidate = (BASE_DIR / relative_path).resolve()
+def resolve_safe_path(codebase_path: str, relative_path: str) -> Path:
+    """Resolve relative_path against codebase_path and reject anything
+    that escapes it or touches a denied name."""
+    base = Path(codebase_path).resolve()
+    candidate = (base / relative_path).resolve()
 
-    if not candidate.is_relative_to(BASE_DIR):
-        raise ValueError(
-            f"Path '{relative_path}' escapes the allowed directory."
-        )
+    if not candidate.is_relative_to(base):
+        raise ValueError(f"Path '{relative_path}' escapes the allowed directory.")
+
+    if any(part in DENIED_NAMES for part in candidate.relative_to(base).parts):
+        raise ValueError(f"Access to '{relative_path}' is denied.")
+
     return candidate
 
 
 @tool
-def read_file(path: str) -> str:
-    """Read the contents of a file inside the agent's workspace.
+def read_file(path: str, codebase_path: str) -> str:
+    """Read the contents of a file inside the codebase.
 
     Args:
-        path: file path relative to the workspace root
+        path: file path relative to the codebase root
+        codebase_path: root directory of the codebase being inspected
     """
     try:
-        safe_path = resolve_safe_path(path)
+        safe_path = resolve_safe_path(codebase_path, path)
     except ValueError as e:
         return str(e)
 
@@ -42,14 +44,15 @@ def read_file(path: str) -> str:
 
 
 @tool
-def list_directory(path: str = ".") -> str:
-    """List files and folders inside a directory in the agent's workspace.
+def list_directory(path: str, codebase_path: str) -> str:
+    """List files and folders inside a directory in the codebase.
 
     Args:
-        path: directory path relative to the workspace root, defaults to root
+        path: directory path relative to the codebase root
+        codebase_path: root directory of the codebase being inspected
     """
     try:
-        safe_path = resolve_safe_path(path)
+        safe_path = resolve_safe_path(codebase_path, path)
     except ValueError as e:
         return str(e)
 
@@ -58,5 +61,9 @@ def list_directory(path: str = ".") -> str:
     if not safe_path.is_dir():
         return f"Not a directory: {path}"
 
-    entries = sorted(p.name + ("/" if p.is_dir() else "") for p in safe_path.iterdir())
+    entries = sorted(
+        p.name + ("/" if p.is_dir() else "")
+        for p in safe_path.iterdir()
+        if p.name not in DENIED_NAMES
+    )
     return "\n".join(entries) if entries else "(empty directory)"

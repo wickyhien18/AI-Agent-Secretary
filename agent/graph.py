@@ -39,25 +39,25 @@ def route_after_plan(state: AgentState) -> str:
 
 def act(state: AgentState) -> dict:
     """Execute every tool call requested by the last AIMessage."""
+    NEEDS_CODEBASE_PATH = {"search_codebase", "read_file", "list_directory"}
+    
     last_message = state["messages"][-1]
     tool_messages = []
-
+    
     for tool_call in last_message.tool_calls:
         name = tool_call["name"]
         args = dict(tool_call["args"])
 
-        # Defense-in-depth validation (Bug 2 fix): never trust a
-        # model-guessed codebase_path — always use the one already
-        # known in state, or fail clearly instead of guessing.
-        if name == "search_codebase":
+        if name in NEEDS_CODEBASE_PATH:
             if state.get("codebase_path"):
                 args["codebase_path"] = state["codebase_path"]
             else:
                 tool_messages.append(ToolMessage(
-                    content="Missing codebase_path. Ask the user which repository to search.",
+                    content="Missing codebase_path...",
                     tool_call_id=tool_call["id"],
                 ))
                 continue
+
 
         if not args.get("query", "").strip():
             tool_messages.append(ToolMessage(
