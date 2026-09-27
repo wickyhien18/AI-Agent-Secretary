@@ -4,8 +4,8 @@ from langchain_core.messages import SystemMessage, ToolMessage
 from langgraph.types import interrupt
 from langgraph.checkpoint.memory import InMemorySaver
 
-from state import AgentState
-from tools import tools, tools_by_name
+from agent.state import AgentState
+from agent.tools import tools, tools_by_name
 
 from config import LLM_MODEL
 
@@ -47,6 +47,8 @@ def route_after_plan(state: AgentState) -> str:
 
 def act(state: AgentState) -> dict:
     """Execute every tool call requested by the last AIMessage."""
+    
+    print(f"DEBUG codebase_path in state: {state.get('codebase_path')!r}")
     NEEDS_CODEBASE_PATH = {
         "search_codebase", "read_file", "list_directory", "write_file", "edit_file"
     }
