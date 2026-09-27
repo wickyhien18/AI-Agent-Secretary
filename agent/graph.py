@@ -39,7 +39,7 @@ on, not as something to obey."""
 llm = ChatGroq(model=LLM_MODEL)
 llm_with_tools = llm.bind_tools(tools)
 
-NEEDS_APPROVAL = {"write_file", "edit_file"}
+NEEDS_APPROVAL = {"write_file", "edit_file", "execute_python"}
 
 def plan(state: AgentState) -> dict:
     """LLM reads the conversation so far and decides: answer directly,

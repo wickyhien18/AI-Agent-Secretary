@@ -4,6 +4,7 @@ from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from tavily import TavilyClient
 from langchain_core.tools import tool
+from agent.docker_tool import execute_python
 
 CHROMA_PATH = "./chroma_db"
 embedding_fn = DefaultEmbeddingFunction()
@@ -178,5 +179,5 @@ def edit_file(path: str, old_str: str, new_str: str, codebase_path: str) -> str:
     safe_path.write_text(text.replace(old_str, new_str, 1), encoding="utf-8")
     return f"Edited {path} successfully."
 
-tools = [search_codebase, search_web, read_file, list_directory, write_file, edit_file]
+tools = [search_codebase, search_web, read_file, list_directory, write_file, edit_file, execute_python]
 tools_by_name = {t.name: t for t in tools}
