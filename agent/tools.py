@@ -4,7 +4,7 @@ from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from tavily import TavilyClient
 from langchain_core.tools import tool
-from agent.file_tools import read_file, list_directory
+from agent.file_tools import read_file, list_directory, write_file, edit_file
 
 CHROMA_PATH = "./chroma_db"
 embedding_fn = DefaultEmbeddingFunction()
@@ -69,5 +69,5 @@ def search_web(query: str) -> str:
         output.append(f"[{result['url']}]\n{result['content']}")
     return "\n---\n".join(output)
 
-tools = [search_codebase, search_web, read_file, list_directory]
+tools = [search_codebase, search_web, read_file, list_directory, write_file, edit_file]
 tools_by_name = {t.name: t for t in tools}

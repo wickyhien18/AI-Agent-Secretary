@@ -67,3 +67,53 @@ def list_directory(path: str, codebase_path: str) -> str:
         if p.name not in DENIED_NAMES
     )
     return "\n".join(entries) if entries else "(empty directory)"
+
+@tool
+def write_file(path: str, content: str, codebase_path: str) -> str:
+    """Create a new file or overwrite an existing file with the given content.
+
+    Args:
+        path: file path relative to the codebase root
+        content: full text content to write into the file
+        codebase_path: root directory of the codebase being inspected
+    """
+    try:
+        safe_path = resolve_safe_path(codebase_path, path)
+    except ValueError as e:
+        return str(e)
+
+    safe_path.parent.mkdir(parents=True, exist_ok=True)
+    safe_path.write_text(content, encoding="utf-8")
+    return f"Wrote {len(content)} chars to {path}"
+
+
+@tool
+def edit_file(path: str, old_str: str, new_str: str, codebase_path: str) -> str:
+    """Replace an exact, unique piece of text inside an existing file.
+    Fails if old_str appears zero times or more than once, to avoid
+    accidentally editing the wrong spot.
+
+    Args:
+        path: file path relative to the codebase root
+        old_str: exact text to find and replace, must appear exactly once
+        new_str: text to replace it with
+        codebase_path: root directory of the codebase being inspected
+    """
+    try:
+        safe_path = resolve_safe_path(codebase_path, path)
+    except ValueError as e:
+        return str(e)
+
+    if not safe_path.exists():
+        return f"File not found: {path}"
+
+    text = safe_path.read_text(encoding="utf-8", errors="ignore")
+    count = text.count(old_str)
+
+    if count == 0:
+        return f"old_str not found in {path}. No changes made."
+    if count > 1:
+        return f"old_str appears {count} times in {path} — must be unique. No changes made."
+
+    safe_path.write_text(text.replace(old_str, new_str, 1), encoding="utf-8")
+    return f"Edited {path} successfully."

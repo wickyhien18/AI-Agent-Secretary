@@ -39,7 +39,9 @@ def route_after_plan(state: AgentState) -> str:
 
 def act(state: AgentState) -> dict:
     """Execute every tool call requested by the last AIMessage."""
-    NEEDS_CODEBASE_PATH = {"search_codebase", "read_file", "list_directory"}
+    NEEDS_CODEBASE_PATH = {
+        "search_codebase", "read_file", "list_directory", "write_file", "edit_file"
+    }
     
     last_message = state["messages"][-1]
     tool_messages = []
