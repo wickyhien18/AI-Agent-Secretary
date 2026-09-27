@@ -119,4 +119,4 @@ def build_graph():
     graph.add_edge("act", "observe")
     graph.add_conditional_edges("observe", route_after_observe, {"plan": "plan", END: END})
 
-    return graph.compile()
+    return graph.compile(checkpointer=InMemorySaver())
