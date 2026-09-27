@@ -16,7 +16,7 @@ class AgentState(TypedDict):
 
     # Path to the codebase currently being inspected.
     # None when the current question does't involve code at all
-    codebase_path = str | None
+    codebase_path: str | None
 
     # Number of plan -> act -> observe cycles completed so far.
     # Used to hard-stop the loop if the agent keep looping
