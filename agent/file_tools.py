@@ -4,7 +4,7 @@ from langchain_core.tools import tool
 # Paths containing any of these names are always denied, even inside
 # an otherwise-allowed codebase_path — prevents the agent from reading
 # its own secrets (.env) or internal data (chroma_db, .git).
-DENIED_NAMES = {".env", "chroma_db", ".git"}
+DENIED_NAMES = {".env", "chroma_db", ".git", ".venv"}
 
 
 def resolve_safe_path(codebase_path: str, relative_path: str) -> Path:
