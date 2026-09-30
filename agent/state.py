@@ -25,3 +25,4 @@ class AgentState(TypedDict):
 
     plan: list[str]        # ordered list of steps, written once by planner
     current_step: int      # index into plan, advanced by check_progress
+    tool_rounds: int
