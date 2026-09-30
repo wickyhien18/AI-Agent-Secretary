@@ -103,6 +103,17 @@ def route_after_executor(state: AgentState) -> str:
         return "act"
     return "advance_step"  # text-only reply means this step is done
 
+def already_called(state: AgentState, name: str, args: dict) -> bool:
+    """True if an identical tool call was already made since the last user message."""
+    msgs = state["messages"][:-1]  # exclude the AIMessage being executed now
+    for m in reversed(msgs):
+        if m.type == "human":
+            break
+        for tc in getattr(m, "tool_calls", None) or []:
+            if tc["name"] == name and tc["args"] == args:
+                return True
+    return False
+
 def act(state: AgentState) -> dict:
     """Execute every tool call requested by the last AIMessage."""
 
@@ -121,6 +132,13 @@ def act(state: AgentState) -> dict:
         name = tool_call["name"]
         args = dict(tool_call["args"])
         print(f"DEBUG tool_call: {name} args={args}")
+
+        if already_called(state, name, dict(tool_call["args"])):
+            tool_messages.append(ToolMessage(
+                content="Duplicate call skipped: this exact call was already made. Use the earlier result.",
+                tool_call_id=tool_call["id"],
+            ))
+            continue
 
         if name in NEEDS_CODEBASE_PATH:
             if state.get("codebase_path"):

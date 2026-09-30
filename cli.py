@@ -12,9 +12,10 @@ while True:
     if question.lower() in ("exit", "quit"):
         break
 
+    
     result = graph.invoke(
         {"messages": [HumanMessage(content=question)],
-         "codebase_path": codebase_path, "step_count": 0},
+         "codebase_path": codebase_path, "step_count": 0, "plan": [], "current_step": 0, "tool_rounds": 0},
         config=config,
     )
 
