@@ -1,8 +1,9 @@
 from langgraph.graph import StateGraph, END
 from langchain_groq import ChatGroq
-from langchain_core.messages import SystemMessage, ToolMessage, AIMessage
+from langchain_core.messages import SystemMessage, ToolMessage, AIMessage, HumanMessage
 from langgraph.types import interrupt
 from langgraph.checkpoint.memory import InMemorySaver
+from pydantic import BaseModel, Field
 import groq
 
 from agent.state import AgentState
@@ -41,25 +42,35 @@ llm_with_tools = llm.bind_tools(tools)
 
 NEEDS_APPROVAL = {"write_file", "edit_file", "execute_python"}
 
-def plan(state: AgentState) -> dict:
-    """LLM reads the conversation so far and decides: answer directly,
-    or request a tool call."""
+class Plan(BaseModel):
+    steps: list[str] = Field(description="Ordered list of concrete steps to answer the user's request")
+
+planner_llm = llm.with_structured_output(Plan)
+
+def planner(state: AgentState) -> dict:
+    """Generate a full multi-step plan before any execution begins."""
+    user_question = state["messages"][-1].content
+    result = planner_llm.invoke(
+        f"Break this request into a short ordered list of concrete steps: {user_question}"
+    )
+    return {"plan": result.steps, "current_step": 0}
+
+def executor(state: AgentState) -> dict:
+    """Same as the old 'plan' node, but scoped to the current plan step
+    instead of the entire original question."""
+    current_step_text = state["plan"][state["current_step"]]
     messages = state["messages"]
     if not any(isinstance(m, SystemMessage) for m in messages):
         messages = [SystemMessage(content=SYSTEM_PROMPT)] + messages
 
+    step_prompt = HumanMessage(content=f"Current step to complete: {current_step_text}")
     try:
-        response = llm_with_tools.invoke(messages)
+        response = llm_with_tools.invoke(messages + [step_prompt])
     except groq.BadRequestError:
-        # The model occasionally emits a malformed tool-call generation.
-        # Retrying once with the same input often succeeds, since this
-        # is a stochastic sampling failure, not a deterministic bug.
         try:
-            response = llm_with_tools.invoke(messages)
+            response = llm_with_tools.invoke(messages + [step_prompt])
         except groq.BadRequestError:
-            response = AIMessage(
-                content="I had trouble formatting a tool call. Could you rephrase your request more simply?"
-            )
+            response = AIMessage(content="I had trouble with this step.")
 
     return {"messages": [response]}
 
@@ -132,23 +143,30 @@ def observe(state: AgentState) -> dict:
     return {"step_count": state["step_count"] + 1}
 
 
-def route_after_observe(state: AgentState) -> str:
-    """Conditional edge: loop back to plan, or force stop if too many steps."""
+def check_progress(state: AgentState) -> str:
     if state["step_count"] >= MAX_STEPS:
         return END
-    return "plan"
+    if state["current_step"] + 1 >= len(state["plan"]):
+        return END  # plan fully completed
+    return "advance_step"
+
+def advance_step(state: AgentState) -> dict:
+    return {"current_step": state["current_step"] + 1}
 
 
 def build_graph():
     graph = StateGraph(AgentState)
-
-    graph.add_node("plan", plan)
+    graph.add_node("planner", planner)
+    graph.add_node("executor", executor)
     graph.add_node("act", act)
     graph.add_node("observe", observe)
+    graph.add_node("advance_step", advance_step)
 
-    graph.set_entry_point("plan")
-    graph.add_conditional_edges("plan", route_after_plan, {"act": "act", END: END})
+    graph.set_entry_point("planner")
+    graph.add_edge("planner", "executor")
+    graph.add_conditional_edges("executor", route_after_plan, {"act": "act", END: END})
     graph.add_edge("act", "observe")
-    graph.add_conditional_edges("observe", route_after_observe, {"plan": "plan", END: END})
+    graph.add_conditional_edges("observe", check_progress, {"advance_step": "advance_step", END: END})
+    graph.add_edge("advance_step", "executor")
 
     return graph.compile(checkpointer=InMemorySaver())

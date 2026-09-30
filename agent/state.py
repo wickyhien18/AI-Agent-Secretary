@@ -22,3 +22,6 @@ class AgentState(TypedDict):
     # Used to hard-stop the loop if the agent keep looping
     # without reaching an answer (avoids infinite cost/latency)
     step_count: int
+
+    plan: list[str]        # ordered list of steps, written once by planner
+    current_step: int      # index into plan, advanced by check_progress
