@@ -11,7 +11,7 @@ from agent.tools import tools, tools_by_name
 
 from config import LLM_MODEL
 
-MAX_STEPS = 5
+MAX_STEPS = 12
 
 SYSTEM_PROMPT = """You are a coding assistant and research agent with 6 tools:
 
@@ -48,12 +48,17 @@ class Plan(BaseModel):
 planner_llm = llm.with_structured_output(Plan)
 
 def planner(state: AgentState) -> dict:
-    """Generate a full multi-step plan before any execution begins."""
     user_question = state["messages"][-1].content
-    result = planner_llm.invoke(
-        f"Break this request into a short ordered list of concrete steps: {user_question}"
-    )
-    return {"plan": result.steps, "current_step": 0}
+    try:
+        result = planner_llm.invoke(
+            "Break this request into the fewest concrete steps needed (usually 2-4). "
+            "One step = one goal; never split a single tool action into several steps. "
+            f"Request: {user_question}"
+        )
+        steps = result.steps or [user_question]
+    except groq.BadRequestError:
+        steps = [user_question]  # fallback: treat the whole request as one step
+    return {"plan": steps, "current_step": 0}
 
 def executor(state: AgentState) -> dict:
     """Same as the old 'plan' node, but scoped to the current plan step
@@ -81,6 +86,11 @@ def route_after_plan(state: AgentState) -> str:
         return "act"
     return END
 
+def route_after_executor(state: AgentState) -> str:
+    last_message = state["messages"][-1]
+    if getattr(last_message, "tool_calls", None):
+        return "act"
+    return "advance_step"  # text-only reply means this step is done
 
 def act(state: AgentState) -> dict:
     """Execute every tool call requested by the last AIMessage."""
@@ -142,16 +152,18 @@ def observe(state: AgentState) -> dict:
     """Bookkeeping node: increment the step counter after each act."""
     return {"step_count": state["step_count"] + 1}
 
-
-def check_progress(state: AgentState) -> str:
+def route_after_observe(state: AgentState) -> str:
     if state["step_count"] >= MAX_STEPS:
         return END
-    if state["current_step"] + 1 >= len(state["plan"]):
-        return END  # plan fully completed
-    return "advance_step"
+    return "executor"  # same step, let the model react to the tool result
 
 def advance_step(state: AgentState) -> dict:
     return {"current_step": state["current_step"] + 1}
+
+def route_after_advance(state: AgentState) -> str:
+    if state["current_step"] >= len(state["plan"]):
+        return END
+    return "executor"
 
 
 def build_graph():
@@ -164,9 +176,9 @@ def build_graph():
 
     graph.set_entry_point("planner")
     graph.add_edge("planner", "executor")
-    graph.add_conditional_edges("executor", route_after_plan, {"act": "act", END: END})
+    graph.add_conditional_edges("executor", route_after_executor, {"act": "act", "advance_step": "advance_step"})
     graph.add_edge("act", "observe")
-    graph.add_conditional_edges("observe", check_progress, {"advance_step": "advance_step", END: END})
-    graph.add_edge("advance_step", "executor")
+    graph.add_conditional_edges("observe", route_after_observe, {"executor": "executor", END: END})
+    graph.add_conditional_edges("advance_step", route_after_advance, {"executor": "executor", END: END})
 
     return graph.compile(checkpointer=InMemorySaver())
