@@ -11,8 +11,8 @@ from agent.tools import tools, tools_by_name
 
 from config import LLM_MODEL
 
-MAX_STEPS = 8
-MAX_ROUNDS_PER_STEP = 3
+MAX_STEPS = 12
+MAX_ROUNDS_PER_STEP = 5
 
 SYSTEM_PROMPT = """You are a coding assistant and research agent with 6 tools:
 
@@ -186,8 +186,11 @@ def observe(state: AgentState) -> dict:
 
 def route_after_observe(state: AgentState) -> str:
     if state["step_count"] >= MAX_STEPS:
+        print("DEBUG WARNING: global step limit reached, stopping")
         return END
     if state["tool_rounds"] >= MAX_ROUNDS_PER_STEP:
+        print(f"DEBUG WARNING: step {state['current_step'] + 1} hit the "
+              f"{MAX_ROUNDS_PER_STEP}-round cap, moving on (step may be incomplete)")
         return "advance_step"
     return "executor"  # same step, let the model react to the tool result
 

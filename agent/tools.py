@@ -97,7 +97,7 @@ def read_file(path: str, codebase_path: str) -> str:
         return str(e)
 
     if not safe_path.exists():
-        return f"File not found: {path}"
+        return f"File not found: {path}. Use list_directory to find the correct path."
     if not safe_path.is_file():
         return f"Not a file: {path}"
 
