@@ -23,6 +23,6 @@ class AgentState(TypedDict):
     # without reaching an answer (avoids infinite cost/latency)
     step_count: int
 
-    plan: list[str]        # ordered list of steps, written once by planner
+    plan: list[dict]        # ordered list of steps, written once by planner
     current_step: int      # index into plan, advanced by check_progress
     tool_rounds: int
