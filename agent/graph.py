@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 
 from agent.state import AgentState
 from agent.tools import tools, tools_by_name
-from config import LLM_MODEL
+from config import LLM_MODEL, AGENT_REASONING_EFFORT, AGENT_MAX_TOKENS
 
 # ---------------------------------------------------------------------------
 # Settings
@@ -38,11 +38,11 @@ MAX_TOOL_CHARS = 6000     # tool output longer than this is cut before it goes b
 KEEP_TURNS = 3            # the model only sees the last N user questions of the conversation
 MAX_RATE_LIMIT_WAIT = 30  # seconds; a longer wait is reported to the user instead of slept through
 # Optional cap on tokens generated per LLM call (env AGENT_MAX_TOKENS); unset = provider default.
-MAX_OUTPUT_TOKENS = int(os.getenv("AGENT_MAX_TOKENS", "0")) or None
+MAX_OUTPUT_TOKENS = int(AGENT_MAX_TOKENS) or None
 # Optional reasoning effort (env AGENT_REASONING_EFFORT): "none" or "default" for Qwen3
 # models, "low"/"medium"/"high" for GPT-OSS. Less reasoning = fewer output tokens.
 # Unset = provider default. If Groq rejects the value for your model, unset it.
-REASONING_EFFORT = os.getenv("AGENT_REASONING_EFFORT") or None
+REASONING_EFFORT = AGENT_REASONING_EFFORT or None
 
 # Tools whose codebase_path argument is always injected from state
 # (never trust a path guessed by the model).
