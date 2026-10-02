@@ -1,4 +1,6 @@
 """Command-line entry point for the AI Agent Secretary."""
+from pathlib import Path
+
 from langchain_core.messages import HumanMessage
 from langgraph.types import Command
 
@@ -6,8 +8,19 @@ from agent.graph import build_graph
 
 
 def ask_codebase_path() -> str:
-    raw = input("Codebase path (empty = current directory): ").strip()
-    return raw or "."
+    """Ask for the project directory until it is an existing directory.
+
+    Control characters are dropped: a stray Esc keypress ends up in the string
+    as '\\x1b', and used as a path it would create a folder with that name.
+    """
+    while True:
+        raw = input("Codebase path (empty = current directory): ")
+        cleaned = "".join(ch for ch in raw if ch.isprintable()).strip()
+        path = Path(cleaned or ".").expanduser().resolve()
+        if path.is_dir():
+            print(f"Using codebase: {path}")
+            return str(path)
+        print(f"Not an existing directory: {path}. Try again.")
 
 
 def handle_interrupts(graph, result: dict, config: dict) -> dict:

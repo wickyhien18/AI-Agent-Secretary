@@ -47,6 +47,9 @@ def resolve_safe_path(codebase_path: str, relative_path: str) -> Path:
     base = Path(codebase_path).resolve()
     candidate = (base / relative_path).resolve()
 
+    if not base.is_dir():
+        raise ValueError(f"Codebase root '{codebase_path}' is not an existing directory.")
+
     if not candidate.is_relative_to(base):
         raise ValueError(f"Path '{relative_path}' escapes the allowed directory.")
 

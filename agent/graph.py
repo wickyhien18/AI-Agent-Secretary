@@ -3,7 +3,7 @@
 Flow:
     planner -> executor -+-> act -> observe -+-> executor      (same step, react to the tool result)
                          |                   +-> advance_step  (per-step round cap reached)
-                         |                   +-> finalizer     (global step cap reached)
+                         |                   +-> finalizer     (global step cap reached, or user rejected)
                          |
                          +-> advance_step ---+-> executor      (next plan step)
                                              +-> finalizer     (plan finished, 2+ steps)
@@ -11,6 +11,7 @@ Flow:
     finalizer -> END
 """
 import os
+from pathlib import Path
 
 import groq
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -82,7 +83,14 @@ FINALIZER_PROMPT = (
     "Report an action as done ONLY if a tool result in the conversation confirms it; "
     "if there is no such confirmation, say it was not done. "
     "If any step was not completed, say so clearly. "
+    "If the user rejected an action, say it was not done and ask how they want to proceed. "
     "Reply in plain text; do not call tools."
+)
+
+# Tool result sent to the model when the user says no to an action.
+REJECTED_TEXT = (
+    "User rejected this action. Do not retry it or any variation of it. "
+    "Tell the user it was not done and ask how they want to proceed."
 )
 
 # ---------------------------------------------------------------------------
@@ -269,6 +277,15 @@ def act(state: AgentState) -> dict:
                     tool_call_id=call_id,
                 )
                 continue
+            if not Path(state["codebase_path"]).is_dir():
+                results[i] = ToolMessage(
+                    content=(
+                        f"The codebase root {state['codebase_path']!r} is not an existing "
+                        "directory. Tell the user; do not try other paths."
+                    ),
+                    tool_call_id=call_id,
+                )
+                continue
             args["codebase_path"] = state["codebase_path"]
 
         if name in NEEDS_QUERY and not str(args.get("query", "")).strip():
@@ -291,7 +308,7 @@ def act(state: AgentState) -> dict:
             })
             if decision != "approve":
                 results[i] = ToolMessage(
-                    content="User rejected this action.",
+                    content=REJECTED_TEXT,
                     tool_call_id=call_id,
                 )
                 continue
@@ -319,7 +336,20 @@ def observe(state: AgentState) -> dict:
     }
 
 
+def user_rejected(state: AgentState) -> bool:
+    """True if the user rejected an action in the latest tool round."""
+    for message in reversed(state["messages"]):
+        if message.type == "ai":
+            break
+        if message.type == "tool" and message.content == REJECTED_TEXT:
+            return True
+    return False
+
+
 def route_after_observe(state: AgentState) -> str:
+    if user_rejected(state):
+        # Do not keep trying variations of something the user said no to.
+        return "finalizer"
     if state["step_count"] >= MAX_STEPS:
         print("WARNING: global step limit reached, wrapping up")
         return "finalizer"
