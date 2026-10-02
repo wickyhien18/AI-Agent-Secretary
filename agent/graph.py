@@ -10,7 +10,6 @@ Flow:
                                              +-> END           (plan finished, 1 step)
     finalizer -> END
 """
-import os
 import time
 from pathlib import Path
 
@@ -24,7 +23,7 @@ from pydantic import BaseModel, Field
 
 from agent.state import AgentState
 from agent.tools import tools, tools_by_name
-from config import LLM_MODEL, AGENT_REASONING_EFFORT, AGENT_MAX_TOKENS
+from config import LLM_MODEL, AGENT_REASONING_EFFORT, AGENT_MAX_TOKENS, AGENT_DEBUG
 
 # ---------------------------------------------------------------------------
 # Settings
@@ -56,7 +55,7 @@ NEEDS_QUERY = {"search_codebase", "search_web"}
 NEEDS_APPROVAL = {"write_file", "edit_file", "execute_python"}
 
 # Set AGENT_DEBUG=0 to hide the DEBUG lines.
-DEBUG = os.getenv("AGENT_DEBUG", "1") == "1"
+DEBUG = AGENT_DEBUG == "1"
 
 SYSTEM_PROMPT = """You are a coding assistant and research agent with 7 tools:
 
