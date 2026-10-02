@@ -11,6 +11,7 @@ Flow:
     finalizer -> END
 """
 import os
+import time
 from pathlib import Path
 
 import groq
@@ -31,6 +32,17 @@ from config import LLM_MODEL
 
 MAX_STEPS = 12            # global cap on tool rounds for one user question
 MAX_ROUNDS_PER_STEP = 5   # cap on tool rounds inside a single plan step
+
+# Token savers. Every LLM call re-sends the whole visible history, so these matter a lot.
+MAX_TOOL_CHARS = 6000     # tool output longer than this is cut before it goes back to the model
+KEEP_TURNS = 3            # the model only sees the last N user questions of the conversation
+MAX_RATE_LIMIT_WAIT = 30  # seconds; a longer wait is reported to the user instead of slept through
+# Optional cap on tokens generated per LLM call (env AGENT_MAX_TOKENS); unset = provider default.
+MAX_OUTPUT_TOKENS = int(os.getenv("AGENT_MAX_TOKENS", "0")) or None
+# Optional reasoning effort (env AGENT_REASONING_EFFORT): "none" or "default" for Qwen3
+# models, "low"/"medium"/"high" for GPT-OSS. Less reasoning = fewer output tokens.
+# Unset = provider default. If Groq rejects the value for your model, unset it.
+REASONING_EFFORT = os.getenv("AGENT_REASONING_EFFORT") or None
 
 # Tools whose codebase_path argument is always injected from state
 # (never trust a path guessed by the model).
@@ -66,6 +78,9 @@ use list_directory to locate it.
 
 Never claim that you created, edited or ran something unless a tool result in
 this conversation confirms it. If you did not call the tool, you did not do it.
+
+Long tool output is cut and ends with "[output truncated ...]". If you need a
+part that was cut, use search_codebase to find it.
 
 If a required tool parameter is missing from the user's question, ask the
 user to clarify BEFORE calling the tool. Do not guess or invent parameter
@@ -116,12 +131,28 @@ class Plan(BaseModel):
     )
 
 
-llm = ChatGroq(model=LLM_MODEL)
-llm_with_tools = llm.bind_tools(tools)
-# Same model, but it MUST call a tool (it cannot answer in plain text). Used for the
-# first round of a step that needs a tool, so the model cannot just claim it is done.
-llm_forced = llm.bind_tools(tools, tool_choice="required")
-planner_llm = llm.with_structured_output(Plan)
+ACTIVE = {"model": None, "max_tokens": None, "reasoning_effort": None}
+llm = llm_with_tools = llm_forced = planner_llm = None  # built by configure_model()
+
+
+def configure_model(
+    model: str,
+    max_tokens: int | None = None,
+    reasoning_effort: str | None = None,
+) -> None:
+    """(Re)build every LLM object. Runs once at import time; eval.py calls it again
+    to compare models inside one process."""
+    global llm, llm_with_tools, llm_forced, planner_llm
+    ACTIVE.update(model=model, max_tokens=max_tokens, reasoning_effort=reasoning_effort)
+    llm = ChatGroq(model=model, max_tokens=max_tokens, reasoning_effort=reasoning_effort)
+    llm_with_tools = llm.bind_tools(tools)
+    # Same model, but it MUST call a tool (it cannot answer in plain text). Used for the
+    # first round of a step that needs a tool, so the model cannot just claim it is done.
+    llm_forced = llm.bind_tools(tools, tool_choice="required")
+    planner_llm = llm.with_structured_output(Plan)
+
+
+configure_model(LLM_MODEL, MAX_OUTPUT_TOKENS, REASONING_EFFORT)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -133,11 +164,75 @@ def debug(message: str) -> None:
         print(f"DEBUG {message}")
 
 
-def with_system_prompt(messages: list) -> list:
-    """Prepend the system prompt (it is never stored in state)."""
-    if any(isinstance(m, SystemMessage) for m in messages):
+def window(messages: list, keep_turns: int = KEEP_TURNS) -> list:
+    """Keep only the last `keep_turns` user questions and everything after them.
+    Cutting at a human message never separates a tool call from its tool result."""
+    human_positions = [i for i, m in enumerate(messages) if m.type == "human"]
+    if len(human_positions) <= keep_turns:
         return messages
-    return [SystemMessage(content=SYSTEM_PROMPT)] + messages
+    return messages[human_positions[-keep_turns]:]
+
+
+def with_system_prompt(messages: list) -> list:
+    """Prepend the system prompt (it is never stored in state) and drop old turns."""
+    return [SystemMessage(content=SYSTEM_PROMPT)] + window(messages)
+
+
+class RateLimitStop(Exception):
+    """Raised when a rate limit will not go away by waiting a few seconds."""
+
+
+def rate_limit_wait(error: groq.RateLimitError) -> float:
+    """Seconds to sleep before retrying. Raises RateLimitStop when waiting cannot help."""
+    text = str(error)
+    if "Request too large" in text:
+        # One request is bigger than the per-minute cap: retrying the same request is pointless.
+        raise RateLimitStop(
+            f"One request is bigger than your per-minute limit for {ACTIVE['model']}. "
+            "Lower AGENT_MAX_TOKENS or use a model with a higher limit. "
+            f"Groq said: {text}"
+        )
+    try:
+        wait = float(error.response.headers.get("retry-after", 5))
+    except (TypeError, ValueError):
+        wait = 5.0
+    if wait > MAX_RATE_LIMIT_WAIT:
+        raise RateLimitStop(
+            f"Rate limit reached, Groq asks to retry in about {wait:.0f}s. Groq said: {text}"
+        )
+    return wait
+
+
+def invoke_with_backoff(model, messages):
+    """model.invoke() that waits out short rate limits (HTTP 429), up to 3 tries."""
+    for attempt in range(1, 4):
+        try:
+            return model.invoke(messages)
+        except groq.RateLimitError as error:
+            wait = rate_limit_wait(error)
+            if attempt == 3:
+                raise RateLimitStop(f"Still rate limited after 3 tries. Groq said: {error}")
+            debug(f"rate limited, waiting {wait:.1f}s (try {attempt}/3)")
+            time.sleep(wait + 0.5)
+
+
+USAGE = {"calls": 0, "input": 0, "output": 0}
+
+
+def track(response):
+    """Add the token usage reported by Groq to the per-question counter."""
+    usage = getattr(response, "usage_metadata", None) or {}
+    USAGE["calls"] += 1
+    USAGE["input"] += usage.get("input_tokens", 0)
+    USAGE["output"] += usage.get("output_tokens", 0)
+    debug(f"tokens in={usage.get('input_tokens', '?')} out={usage.get('output_tokens', '?')}")
+    return response
+
+
+def usage_summary() -> str:
+    """Totals for the current question (the planner call is not counted)."""
+    return (f"LLM calls: {USAGE['calls']}, input tokens: {USAGE['input']}, "
+            f"output tokens: {USAGE['output']}")
 
 
 def call_llm(messages: list, fallback_text: str, force_tool: bool = False) -> AIMessage:
@@ -150,7 +245,7 @@ def call_llm(messages: list, fallback_text: str, force_tool: bool = False) -> AI
     attempts = [llm_forced, llm_forced, llm_with_tools] if force_tool else [llm_with_tools] * 2
     for number, model in enumerate(attempts, start=1):
         try:
-            return model.invoke(messages)
+            return track(invoke_with_backoff(model, messages))
         except groq.BadRequestError as error:
             debug(f"LLM call failed (attempt {number}/{len(attempts)}): {error}")
     return AIMessage(content=fallback_text)
@@ -178,16 +273,20 @@ def already_called(state: AgentState, name: str, args: dict) -> bool:
 
 def planner(state: AgentState) -> dict:
     """Write the whole multi-step plan once per user question."""
+    USAGE.update(calls=0, input=0, output=0)  # new question: restart the token counter
     user_question = state["messages"][-1].content
     try:
-        result = planner_llm.invoke(
+        result = invoke_with_backoff(
+            planner_llm,
             "Break this request into the fewest concrete steps needed (usually 2-4). "
             "One step = one goal; never split a single tool action into several steps. "
             "For every step say whether it needs a tool. "
             f"Request: {user_question}"
         )
         steps = [{"text": s.text, "needs_tool": s.needs_tool} for s in result.steps]
-    except Exception as error:  # a planner failure must not kill the session
+    except RateLimitStop:
+        raise
+    except Exception as error:  # any other planner failure must not kill the session
         debug(f"planner failed, using a single-step plan: {error!r}")
         steps = []
     if not steps:
@@ -320,8 +419,12 @@ def act(state: AgentState) -> dict:
             output = tools_by_name[name].invoke(args)
         except Exception as error:  # report tool failures to the model instead of crashing
             output = f"Tool error: {error}"
+        text = str(output)
+        if len(text) > MAX_TOOL_CHARS:
+            cut = len(text) - MAX_TOOL_CHARS
+            text = text[:MAX_TOOL_CHARS] + f"\n[output truncated: {cut} more characters]"
         results[i] = ToolMessage(
-            content=f"<tool_result>\n{output}\n</tool_result>",
+            content=f"<tool_result>\n{text}\n</tool_result>",
             tool_call_id=call_id,
         )
 
@@ -389,6 +492,10 @@ def finalizer(state: AgentState) -> dict:
 
 
 def build_graph():
+    debug(
+        f"model={ACTIVE['model']}, max_tokens={ACTIVE['max_tokens']}, "
+        f"reasoning_effort={ACTIVE['reasoning_effort']}, keep_turns={KEEP_TURNS}"
+    )
     graph = StateGraph(AgentState)
 
     graph.add_node("planner", planner)

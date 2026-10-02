@@ -4,7 +4,7 @@ from pathlib import Path
 from langchain_core.messages import HumanMessage
 from langgraph.types import Command
 
-from agent.graph import build_graph
+from agent.graph import DEBUG, RateLimitStop, build_graph, usage_summary
 
 
 def ask_codebase_path() -> str:
@@ -52,20 +52,27 @@ def main() -> None:
             if question.lower() in ("exit", "quit"):
                 break
 
-            result = graph.invoke(
-                {
-                    "messages": [HumanMessage(content=question)],
-                    "codebase_path": codebase_path,
-                    # Counters are reset for every new question; messages accumulate.
-                    "step_count": 0,
-                    "plan": [],
-                    "current_step": 0,
-                    "tool_rounds": 0,
-                },
-                config=config,
-            )
-            result = handle_interrupts(graph, result, config)
+            try:
+                result = graph.invoke(
+                    {
+                        "messages": [HumanMessage(content=question)],
+                        "codebase_path": codebase_path,
+                        # Counters are reset for every new question; messages accumulate.
+                        "step_count": 0,
+                        "plan": [],
+                        "current_step": 0,
+                        "tool_rounds": 0,
+                    },
+                    config=config,
+                )
+                result = handle_interrupts(graph, result, config)
+            except RateLimitStop as error:
+                print(f"\nStopped: {error}")
+                continue
+
             print(f"\nAgent: {result['messages'][-1].content}")
+            if DEBUG:
+                print(f"[{usage_summary()}]")
     except (KeyboardInterrupt, EOFError):
         print("\nBye.")
 
