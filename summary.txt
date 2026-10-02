@@ -1,0 +1,1 @@
+state.py defines AgentState TypedDict for LangGraph state management.
