@@ -1,10 +1,10 @@
 """Compare models on the same set of agent tasks. Makes REAL Groq calls.
 
 Usage:
-    python eval.py                                   # default models, all tasks, 1 run each
+    python eval.py                                   # the default model, all tasks, 1 run each
+    python eval.py --model gpt-oss --model qwen      # compare models (aliases from models.toml)
+    python eval.py --model openai:<model id>         # any provider:model, no models.toml entry needed
     python eval.py --tasks chat,create_file          # only some tasks
-    python eval.py --model openai/gpt-oss-20b
-    python eval.py --model "qwen/qwen3.8-27b,max_tokens=900,reasoning_effort=none"
     python eval.py --repeats 3 --verbose
 
 Every run works on a throw-away copy of a small fixture repo in a temp directory, so the
@@ -329,21 +329,6 @@ def run_task(label: str, task: Task, repeat: int, verbose: bool) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def parse_model_spec(spec: str) -> dict:
-    """'name' or 'name,max_tokens=900,reasoning_effort=none'."""
-    name, *options = [part.strip() for part in spec.split(",")]
-    settings = {"model": name, "max_tokens": None, "reasoning_effort": None}
-    for option in options:
-        key, _, value = option.partition("=")
-        if key == "max_tokens":
-            settings["max_tokens"] = int(value)
-        elif key == "reasoning_effort":
-            settings["reasoning_effort"] = value
-        else:
-            raise SystemExit(f"Unknown option '{key}' in '{spec}' (use max_tokens, reasoning_effort)")
-    return settings
-
-
 def average(rows: list, key: str) -> float:
     return sum(r[key] for r in rows) / len(rows) if rows else 0.0
 
@@ -390,23 +375,18 @@ def save(results: list, path: str) -> None:
     Path(path).write_text(json.dumps(results, indent=2), encoding="utf-8")
 
 
-DEFAULT_MODELS = [
-    "openai/gpt-oss-20b",
-    "qwen/qwen3.8-27b,max_tokens=900,reasoning_effort=none",
-]
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Compare models on the same agent tasks.")
     parser.add_argument("--model", action="append",
-                        help="model spec, repeatable: 'name[,max_tokens=N][,reasoning_effort=X]'")
+                        help="alias from models.toml or 'provider:model'; repeat to compare models "
+                             "(default: only the default model)")
     parser.add_argument("--tasks", default="", help="comma separated task names (default: all)")
     parser.add_argument("--repeats", type=int, default=1, help="runs per task and model")
     parser.add_argument("--verbose", action="store_true", help="print the agent's debug lines")
     parser.add_argument("--out", default=str(PROJECT_ROOT / "eval_results.json"))
     args = parser.parse_args()
 
-    specs = args.model or DEFAULT_MODELS
+    refs = args.model or [None]
     wanted = [t.strip() for t in args.tasks.split(",") if t.strip()]
     unknown = set(wanted) - {t.name for t in TASKS}
     if unknown:
@@ -415,18 +395,26 @@ def main() -> None:
 
     print(f"Fixture repo: {REPO}")
     print(f"Tasks: {[t.name for t in tasks]}  x{args.repeats} run(s)")
-    print(f"Models: {specs}")
-    print("NOTE: this makes real Groq calls and uses your token quota.")
+    print(f"Models: {[ref or 'default' for ref in refs]}")
+    if not args.model:
+        known = ", ".join(row[0] for row in g.list_models()) or "(no models.toml found)"
+        print(f"Tip: compare models with --model A --model B. Available: {known}")
+    print("NOTE: this makes real API calls and uses your token quota (or money, for paid providers).")
 
     results: list = []
     try:
-        for spec in specs:
-            g.configure_model(**parse_model_spec(spec))
-            print(f"\n--- {spec}")
+        for ref in refs:
+            try:
+                g.configure_model(ref)
+            except Exception as error:
+                print(f"\n--- {ref or 'default'}: cannot set up this model: {error}")
+                continue
+            label = g.ACTIVE["alias"]
+            print(f"\n--- {label} ({g.ACTIVE['provider']}:{g.ACTIVE['model']})")
             stop_model = False
             for task in tasks:
                 for repeat in range(1, args.repeats + 1):
-                    record = run_task(spec, task, repeat, args.verbose)
+                    record = run_task(label, task, repeat, args.verbose)
                     results.append(record)
                     save(results, args.out)
                     verdict = "PASS" if record["passed"] else "FAIL"

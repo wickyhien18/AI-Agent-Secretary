@@ -10,12 +10,14 @@ Flow:
                                              +-> END           (plan finished, 1 step)
     finalizer -> END
 """
+import importlib
+import os
+import re
 import time
+import tomllib
 from pathlib import Path
 
-import groq
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from langchain_groq import ChatGroq
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, StateGraph
 from langgraph.types import interrupt
@@ -23,7 +25,7 @@ from pydantic import BaseModel, Field
 
 from agent.state import AgentState
 from agent.tools import tools, tools_by_name
-from config import LLM_MODEL, AGENT_REASONING_EFFORT, AGENT_MAX_TOKENS, AGENT_DEBUG
+from config import LLM_MODEL
 
 # ---------------------------------------------------------------------------
 # Settings
@@ -36,12 +38,7 @@ MAX_ROUNDS_PER_STEP = 5   # cap on tool rounds inside a single plan step
 MAX_TOOL_CHARS = 6000     # tool output longer than this is cut before it goes back to the model
 KEEP_TURNS = 3            # the model only sees the last N user questions of the conversation
 MAX_RATE_LIMIT_WAIT = 30  # seconds; a longer wait is reported to the user instead of slept through
-# Optional cap on tokens generated per LLM call (env AGENT_MAX_TOKENS); unset = provider default.
-MAX_OUTPUT_TOKENS = int(AGENT_MAX_TOKENS) or None
-# Optional reasoning effort (env AGENT_REASONING_EFFORT): "none" or "default" for Qwen3
-# models, "low"/"medium"/"high" for GPT-OSS. Less reasoning = fewer output tokens.
-# Unset = provider default. If Groq rejects the value for your model, unset it.
-REASONING_EFFORT = AGENT_REASONING_EFFORT or None
+# Per-model settings (max_tokens, reasoning_effort, ...) live in models.toml.
 
 # Tools whose codebase_path argument is always injected from state
 # (never trust a path guessed by the model).
@@ -55,7 +52,7 @@ NEEDS_QUERY = {"search_codebase", "search_web"}
 NEEDS_APPROVAL = {"write_file", "edit_file", "execute_python"}
 
 # Set AGENT_DEBUG=0 to hide the DEBUG lines.
-DEBUG = AGENT_DEBUG == "1"
+DEBUG = os.getenv("AGENT_DEBUG", "1") == "1"
 
 SYSTEM_PROMPT = """You are a coding assistant and research agent with 7 tools:
 
@@ -130,28 +127,135 @@ class Plan(BaseModel):
     )
 
 
-ACTIVE = {"model": None, "max_tokens": None, "reasoning_effort": None}
+# Every model is described in models.toml: adding a model needs no code change.
+MODELS_FILE = Path(
+    os.getenv("AGENT_MODELS_FILE") or Path(__file__).resolve().parent.parent / "models.toml"
+)
+
+# provider -> (python module, chat model class). A package is imported only when a model of
+# that provider is used, so you install only what you use.
+PROVIDER_CLASSES = {
+    "groq": ("langchain_groq", "ChatGroq"),
+    "openai": ("langchain_openai", "ChatOpenAI"),
+    "anthropic": ("langchain_anthropic", "ChatAnthropic"),
+    "google": ("langchain_google_genai", "ChatGoogleGenerativeAI"),
+    "ollama": ("langchain_ollama", "ChatOllama"),
+}
+
+
+class ModelConfigError(Exception):
+    """A model reference or a models.toml entry is invalid."""
+
+
+def load_registry() -> dict:
+    """Read models.toml: {"default": alias or None, "models": {alias: entry}}."""
+    if not MODELS_FILE.exists():
+        return {"default": None, "models": {}}
+    try:
+        with MODELS_FILE.open("rb") as handle:
+            data = tomllib.load(handle)
+    except tomllib.TOMLDecodeError as error:
+        raise ModelConfigError(f"{MODELS_FILE} is not valid TOML: {error}") from None
+    return {"default": data.get("default"), "models": data.get("models", {})}
+
+
+def list_models() -> list:
+    """[(alias, provider, model, extra params, is_default)] for every entry in models.toml."""
+    registry = load_registry()
+    rows = []
+    for alias, entry in registry["models"].items():
+        params = {k: v for k, v in entry.items() if k not in ("provider", "model")}
+        rows.append((alias, entry.get("provider"), entry.get("model"), params,
+                     alias == registry["default"]))
+    return rows
+
+
+def resolve_model(ref=None) -> dict:
+    """Turn a model reference into {"alias", "provider", "model", "params"}.
+
+    ref is an alias from models.toml, or 'provider:model' (no extra settings).
+    None means: the AGENT_MODEL env var, then 'default' in models.toml, then LLM_MODEL
+    from config.py. Without a models.toml a bare id is treated as a Groq model id (the old
+    behaviour); with one, an unknown bare name is an error that lists the aliases.
+    """
+    registry = load_registry()
+    aliases = registry["models"]
+    ref = ref or os.getenv("AGENT_MODEL") or registry["default"] or LLM_MODEL
+
+    if ref in aliases:
+        settings = dict(aliases[ref])
+        for key in ("provider", "model"):
+            if key not in settings:
+                raise ModelConfigError(f"[models.{ref}] in {MODELS_FILE.name} needs a '{key}' key")
+        provider, model = settings.pop("provider"), settings.pop("model")
+    else:
+        provider, separator, model = ref.partition(":")
+        if separator and provider in PROVIDER_CLASSES:
+            settings = {}
+        elif not aliases:
+            provider, model, settings = "groq", ref, {}
+        else:
+            known = ", ".join(aliases) or "(none)"
+            raise ModelConfigError(
+                f"Unknown model {ref!r}. Aliases in {MODELS_FILE.name}: {known}. "
+                "Or use 'provider:model-id', for example groq:<id>."
+            )
+    if provider not in PROVIDER_CLASSES:
+        raise ModelConfigError(
+            f"Unknown provider {provider!r} for {ref!r}. Known: {sorted(PROVIDER_CLASSES)}"
+        )
+    return {"alias": ref, "provider": provider, "model": model, "params": settings}
+
+
+def build_chat_model(settings: dict):
+    """Create the chat model object. Extra params are passed straight to its constructor."""
+    module_name, class_name = PROVIDER_CLASSES[settings["provider"]]
+    try:
+        chat_class = getattr(importlib.import_module(module_name), class_name)
+    except (ImportError, AttributeError):
+        package = module_name.replace("_", "-")
+        raise ModelConfigError(
+            f"Provider {settings['provider']!r} needs the package {package}: pip install {package}"
+        ) from None
+    params = dict(settings["params"])
+    key_env = params.pop("api_key_env", None)
+    if key_env:
+        key = os.getenv(key_env)
+        if not key:
+            raise ModelConfigError(
+                f"Environment variable {key_env} is not set (api_key_env of {settings['alias']!r})"
+            )
+        params["api_key"] = key
+    return chat_class(model=settings["model"], **params)
+
+
+ACTIVE = {"alias": None, "provider": None, "model": None, "params": {}}
 llm = llm_with_tools = llm_forced = planner_llm = None  # built by configure_model()
+CONFIG_ERROR = None  # set when the model could not be built at import time
 
 
-def configure_model(
-    model: str,
-    max_tokens: int | None = None,
-    reasoning_effort: str | None = None,
-) -> None:
-    """(Re)build every LLM object. Runs once at import time; eval.py calls it again
-    to compare models inside one process."""
+def configure_model(ref=None, **overrides) -> None:
+    """(Re)build every LLM object. Runs once at import time; cli.py (--model) and eval.py
+    call it again. overrides replace single params, for example max_tokens=500."""
     global llm, llm_with_tools, llm_forced, planner_llm
-    ACTIVE.update(model=model, max_tokens=max_tokens, reasoning_effort=reasoning_effort)
-    llm = ChatGroq(model=model, max_tokens=max_tokens, reasoning_effort=reasoning_effort)
+    settings = resolve_model(ref)
+    settings["params"].update(overrides)
+    llm = build_chat_model(settings)
+    ACTIVE.update(alias=settings["alias"], provider=settings["provider"],
+                  model=settings["model"], params=dict(settings["params"]))
     llm_with_tools = llm.bind_tools(tools)
-    # Same model, but it MUST call a tool (it cannot answer in plain text). Used for the
-    # first round of a step that needs a tool, so the model cannot just claim it is done.
-    llm_forced = llm.bind_tools(tools, tool_choice="required")
+    # "any" = the model MUST call a tool (it cannot answer in plain text). Used for the first
+    # round of a step that needs a tool, so the model cannot just claim it is done. LangChain
+    # translates "any" into each provider's own setting (a provider without that feature
+    # simply ignores it).
+    llm_forced = llm.bind_tools(tools, tool_choice="any")
     planner_llm = llm.with_structured_output(Plan)
 
 
-configure_model(LLM_MODEL, MAX_OUTPUT_TOKENS, REASONING_EFFORT)
+try:
+    configure_model()
+except Exception as error:  # reported by build_graph() / cli.py, so --model can still fix it
+    CONFIG_ERROR = error
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -181,23 +285,65 @@ class RateLimitStop(Exception):
     """Raised when a rate limit will not go away by waiting a few seconds."""
 
 
-def rate_limit_wait(error: groq.RateLimitError) -> float:
+def http_status(error: Exception):
+    """HTTP status of an API error, whichever SDK raised it (None if it has no int status)."""
+    for attribute in ("status_code", "code", "status"):
+        value = getattr(error, attribute, None)
+        if isinstance(value, int):
+            return value
+    return None
+
+
+def error_kind(error: Exception) -> str:
+    """'rate_limit', 'bad_request' or 'other', judged from the HTTP status."""
+    status = http_status(error)
+    name = type(error).__name__
+    if status == 429 or name in ("RateLimitError", "ResourceExhausted"):
+        return "rate_limit"
+    if status == 400 or name == "BadRequestError":
+        return "bad_request"
+    return "other"
+
+
+def parse_retry_seconds(text: str):
+    """Read a wait time such as 'try again in 1.2s', '20ms', '7m12s' or '1h2m' from an
+    error message. Returns None when the message has none."""
+    match = re.search(r"try again in\s+([0-9hms.]+)", text)
+    if not match:
+        return None
+    units = {"ms": 0.001, "s": 1, "m": 60, "h": 3600}
+    parts = re.findall(r"([0-9.]+)(ms|h|m|s)", match.group(1))
+    if not parts:
+        return None
+    return sum(float(number) * units[unit] for number, unit in parts)
+
+
+def rate_limit_wait(error: Exception) -> float:
     """Seconds to sleep before retrying. Raises RateLimitStop when waiting cannot help."""
     text = str(error)
+    lowered = text.lower()
+    if "insufficient_quota" in lowered or "exceeded your current quota" in lowered:
+        # Not a speed limit: the account has no credit left. Waiting changes nothing.
+        raise RateLimitStop(
+            "The account has no credit or quota left. Add credit or raise the spending "
+            f"limit in the provider's billing settings. The API said: {text}"
+        )
     if "Request too large" in text:
         # One request is bigger than the per-minute cap: retrying the same request is pointless.
         raise RateLimitStop(
             f"One request is bigger than your per-minute limit for {ACTIVE['model']}. "
-            "Lower AGENT_MAX_TOKENS or use a model with a higher limit. "
-            f"Groq said: {text}"
+            "Lower max_tokens for this model in models.toml, or use a model with a higher limit. "
+            f"The API said: {text}"
         )
     try:
-        wait = float(error.response.headers.get("retry-after", 5))
-    except (TypeError, ValueError):
+        wait = float(error.response.headers.get("retry-after"))
+    except (AttributeError, TypeError, ValueError):
+        wait = parse_retry_seconds(text)
+    if wait is None:
         wait = 5.0
     if wait > MAX_RATE_LIMIT_WAIT:
         raise RateLimitStop(
-            f"Rate limit reached, Groq asks to retry in about {wait:.0f}s. Groq said: {text}"
+            f"Rate limit reached, the API asks to retry in about {wait:.0f}s. The API said: {text}"
         )
     return wait
 
@@ -207,10 +353,12 @@ def invoke_with_backoff(model, messages):
     for attempt in range(1, 4):
         try:
             return model.invoke(messages)
-        except groq.RateLimitError as error:
+        except Exception as error:
+            if error_kind(error) != "rate_limit":
+                raise
             wait = rate_limit_wait(error)
             if attempt == 3:
-                raise RateLimitStop(f"Still rate limited after 3 tries. Groq said: {error}")
+                raise RateLimitStop(f"Still rate limited after 3 tries. The API said: {error}")
             debug(f"rate limited, waiting {wait:.1f}s (try {attempt}/3)")
             time.sleep(wait + 0.5)
 
@@ -245,7 +393,9 @@ def call_llm(messages: list, fallback_text: str, force_tool: bool = False) -> AI
     for number, model in enumerate(attempts, start=1):
         try:
             return track(invoke_with_backoff(model, messages))
-        except groq.BadRequestError as error:
+        except Exception as error:
+            if error_kind(error) != "bad_request":
+                raise
             debug(f"LLM call failed (attempt {number}/{len(attempts)}): {error}")
     return AIMessage(content=fallback_text)
 
@@ -491,9 +641,11 @@ def finalizer(state: AgentState) -> dict:
 
 
 def build_graph():
+    if llm_with_tools is None:
+        raise CONFIG_ERROR or ModelConfigError("No model is configured.")
     debug(
-        f"model={ACTIVE['model']}, max_tokens={ACTIVE['max_tokens']}, "
-        f"reasoning_effort={ACTIVE['reasoning_effort']}, keep_turns={KEEP_TURNS}"
+        f"model={ACTIVE['alias']} ({ACTIVE['provider']}:{ACTIVE['model']}), "
+        f"params={ACTIVE['params']}, keep_turns={KEEP_TURNS}"
     )
     graph = StateGraph(AgentState)
 
