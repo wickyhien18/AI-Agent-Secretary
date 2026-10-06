@@ -3,6 +3,9 @@ import os
 import time
 import tomllib
 from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
