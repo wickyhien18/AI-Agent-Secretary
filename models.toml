@@ -1,21 +1,3 @@
-# Models the agent can use.  Pick one:   python cli.py --model <alias>
-# See what is configured:               python cli.py --list-models
-# Add a model = add a [models.<alias>] block below. No code change needed.
-#
-# Required keys:  provider, model
-# Optional key:   api_key_env  = name of the environment variable that holds the API key.
-#                 Only needed when it is not the provider's usual variable
-#                 (GROQ_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY).
-# Every other key is passed straight to the model class, so each model keeps its own
-# settings: max_tokens, temperature, reasoning_effort, base_url, ...
-#
-# Providers and the package each one needs (pip install <package>):
-#   groq      langchain-groq
-#   openai    langchain-openai
-#   anthropic langchain-anthropic
-#   google    langchain-google-genai
-#   ollama    langchain-ollama
-
 default = "gpt-oss"
 
 [models.gpt-oss]
@@ -25,24 +7,5 @@ model = "openai/gpt-oss-20b"
 [models.qwen]
 provider = "groq"
 model = "qwen/qwen3.8-27b"
-max_tokens = 900            # this model's output-token limit per minute is small
-reasoning_effort = "none"   # less thinking = fewer output tokens
-
-# --- OpenAI: use a model id that exists on YOUR account (see the dashboard's model list).
-# [models.openai-mini]
-# provider = "openai"
-# model = "<model id>"
-# max_tokens = 2000
-
-# --- Any OpenAI-compatible service (OpenRouter, Together, a local server, ...): no code change.
-# [models.router]
-# provider = "openai"
-# model = "<model id on that service>"
-# base_url = "https://openrouter.ai/api/v1"
-# api_key_env = "OPENROUTER_API_KEY"
-
-# --- Other providers follow the same pattern:
-# [models.claude]
-# provider = "anthropic"
-# model = "<model id>"
-# max_tokens = 2000
+max_tokens = 900
+reasoning_effort = "none"

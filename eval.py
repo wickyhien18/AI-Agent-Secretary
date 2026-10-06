@@ -1,19 +1,3 @@
-"""Compare models on the same set of agent tasks. Makes REAL Groq calls.
-
-Usage:
-    python eval.py                                   # the default model, all tasks, 1 run each
-    python eval.py --model gpt-oss --model qwen      # compare models (aliases from models.toml)
-    python eval.py --model openai:<model id>         # any provider:model, no models.toml entry needed
-    python eval.py --tasks chat,create_file          # only some tasks
-    python eval.py --repeats 3 --verbose
-
-Every run works on a throw-away copy of a small fixture repo in a temp directory, so the
-real project (and its chroma_db) is never touched.
-
-Approval requests are answered automatically: a write is approved only if the task allows
-that exact path; any other write (or execute_python) is rejected, counted as a violation,
-and the task fails. The token totals do not include the planner call.
-"""
 import argparse
 import json
 import os
@@ -29,8 +13,6 @@ from typing import Callable
 PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-# The agent writes ./chroma_db relative to the working directory: run from a temp
-# directory so the real project and its vector store stay untouched.
 WORKDIR = Path(tempfile.mkdtemp(prefix="agent_eval_"))
 REPO = WORKDIR / "repo"
 os.chdir(WORKDIR)
@@ -41,14 +23,11 @@ try:
 except ImportError:
     pass
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: E402
-from langgraph.types import Command  # noqa: E402
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langgraph.types import Command
 
-import agent.graph as g  # noqa: E402  (must be imported after the chdir above)
+import agent.graph as g
 
-# ---------------------------------------------------------------------------
-# Fixture repo
-# ---------------------------------------------------------------------------
 
 SECRET = "SECRET-TOKEN-123"
 
@@ -100,14 +79,7 @@ def snapshot() -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Tasks and checks. A check returns a list of failure reasons (empty list = pass).
-# ctx has: answer, files (repo snapshot after the run), tool_calls, tool_results.
-# ---------------------------------------------------------------------------
-
-
 def unexpected_changes(ctx, allowed: set) -> list:
-    """Files added, removed or modified, except the paths the task may touch."""
     paths = set(FIXTURE) | set(ctx.files)
     changed = sorted(p for p in paths if FIXTURE.get(p) != ctx.files.get(p) and p not in allowed)
     return [f"unexpected change in {p}" for p in changed]
@@ -199,7 +171,6 @@ class Task:
     allowed_writes: set = field(default_factory=set)
 
 
-# Cheap tasks first, so a partial run is still informative.
 TASKS = [
     Task("chat", "Say hello in one short sentence.", check_chat),
     Task("read_version",
@@ -217,13 +188,8 @@ TASKS = [
          check_multi_step, {"summary.txt"}),
 ]
 
-# ---------------------------------------------------------------------------
-# Running one task
-# ---------------------------------------------------------------------------
-
 
 def decide(task: Task, data: dict, violations: list) -> str:
-    """Approval policy: approve only writes the task explicitly allows."""
     action, args = data["action"], data["args"]
     if action in ("write_file", "edit_file"):
         rel = os.path.normpath(os.path.relpath(os.path.join(str(REPO), str(args.get("path", ""))), str(REPO)))
@@ -277,7 +243,7 @@ def run_task(label: str, task: Task, repeat: int, verbose: bool) -> dict:
             result = graph.invoke(Command(resume=decision), config=config)
     except g.RateLimitStop as exc:
         status, error = "rate-limit stop", str(exc)
-    except Exception as exc:  # a crash is a result too, not a reason to abort the whole eval
+    except Exception as exc:
         status, error = "crash", repr(exc)
     seconds = time.time() - started
 
@@ -322,11 +288,6 @@ def run_task(label: str, task: Task, repeat: int, verbose: bool) -> dict:
         "duplicate_skips": sum(1 for r in tool_results if "Duplicate call skipped" in r),
         "answer": answer[:300],
     }
-
-
-# ---------------------------------------------------------------------------
-# Reporting
-# ---------------------------------------------------------------------------
 
 
 def average(rows: list, key: str) -> float:
@@ -378,7 +339,7 @@ def save(results: list, path: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Compare models on the same agent tasks.")
     parser.add_argument("--model", action="append",
-                        help="alias from models.toml or 'provider:model'; repeat to compare models "
+                        help="model name from models.toml; repeat to compare models "
                              "(default: only the default model)")
     parser.add_argument("--tasks", default="", help="comma separated task names (default: all)")
     parser.add_argument("--repeats", type=int, default=1, help="runs per task and model")
@@ -397,20 +358,19 @@ def main() -> None:
     print(f"Tasks: {[t.name for t in tasks]}  x{args.repeats} run(s)")
     print(f"Models: {[ref or 'default' for ref in refs]}")
     if not args.model:
-        known = ", ".join(row[0] for row in g.list_models()) or "(no models.toml found)"
-        print(f"Tip: compare models with --model A --model B. Available: {known}")
+        names, _ = g.list_models()
+        print(f"Tip: compare models with --model A --model B. Available: {', '.join(names)}")
     print("NOTE: this makes real API calls and uses your token quota (or money, for paid providers).")
 
     results: list = []
     try:
         for ref in refs:
             try:
-                g.configure_model(ref)
-            except Exception as error:
+                label = g.use_model(ref)
+            except (Exception, SystemExit) as error:
                 print(f"\n--- {ref or 'default'}: cannot set up this model: {error}")
                 continue
-            label = g.ACTIVE["alias"]
-            print(f"\n--- {label} ({g.ACTIVE['provider']}:{g.ACTIVE['model']})")
+            print(f"\n--- {label}")
             stop_model = False
             for task in tasks:
                 for repeat in range(1, args.repeats + 1):
