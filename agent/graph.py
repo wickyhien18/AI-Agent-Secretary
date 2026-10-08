@@ -23,7 +23,7 @@ KEEP_TURNS = 3
 MAX_WAIT = 30
 
 NEEDS_CODEBASE_PATH = {
-    "search_codebase", "read_file", "list_directory", "write_file", "edit_file",
+    "search_codebase", "read_file", "list_directory", "write_file", "edit_file", "find_files"
 }
 NEEDS_QUERY = {"search_codebase", "search_web"}
 NEEDS_APPROVAL = {"write_file", "edit_file", "execute_python"}
@@ -279,8 +279,8 @@ def act(state: AgentState) -> dict:
     changes = 0
     for call in state["messages"][-1].tool_calls:
         name, args = call["name"], dict(call["args"])
-        debug(f"tool_call: {name} args={args}")
         result = check_call(name, args, state)
+        debug(f"tool_call: {name} args={args}")
         if result is None and name in NEEDS_APPROVAL:
             changes += 1
             if changes > 1:
@@ -290,6 +290,7 @@ def act(state: AgentState) -> dict:
                 result = REJECTED_TEXT
         if result is None:
             result = run_tool(name, args)
+            debug(f"result [{len(result)} chars]: {result[:200]!r}")
         results.append(ToolMessage(content=result, tool_call_id=call["id"]))
     return {"messages": results}
 

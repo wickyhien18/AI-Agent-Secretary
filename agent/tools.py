@@ -1,5 +1,8 @@
 from pathlib import Path
 import chromadb
+import difflib
+import os
+import fnmatch
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from tavily import TavilyClient
@@ -14,6 +17,19 @@ tavily_client = TavilyClient()
 _indexed_paths = set()
 
 DENIED_NAMES = {".env", "chroma_db", ".git", ".venv"}
+
+SKIP_DIRS = {".venv"}
+
+def suggest_paths(base: Path, relative_path: str, limit: int = 5) -> list[str]:
+    wanted = Path(relative_path).name.lower()
+    names = {}
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        for name in filenames:
+            names.setdefault(name.lower(), []).append(
+                str((Path(dirpath) / name).relative_to(base)))
+    close = difflib.get_close_matches(wanted, names, n=limit, cutoff=0.6)
+    return [p for key in close for p in names[key]][:limit]
 
 def index_codebase(codebase_path: str) -> None:
     """Chunk every source file in codebase_path and store embeddings in Chroma.
@@ -85,6 +101,26 @@ def search_web(query: str) -> str:
     for result in response["results"]:
         output.append(f"[{result['url']}]\n{result['content']}")
     return "\n---\n".join(output)
+
+@tool
+def find_files(pattern: str, codebase_path: str) -> str:
+    """Find files by NAME (not content) anywhere in the codebase, recursively.
+    Use when you do not know the exact path. Not for searching file contents.
+
+    Args:
+        pattern: filename or glob pattern, e.g. 'tools.py' or '*tool*.py'
+        codebase_path: root directory of the codebase being inspected
+    """
+    base = Path(codebase_path).resolve()
+    matches = []
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        for name in filenames:
+            if fnmatch.fnmatch(name.lower(), pattern.lower()):
+                matches.append(str((Path(dirpath) / name).relative_to(base)))
+                if len(matches) >= 50:
+                    return "\n".join(matches) + "\n[more results omitted]"
+    return "\n".join(matches) or f"No file matches '{pattern}'."
 
 @tool
 def read_file(path: str, codebase_path: str) -> str:
@@ -182,5 +218,5 @@ def edit_file(path: str, old_str: str, new_str: str, codebase_path: str) -> str:
     safe_path.write_text(text.replace(old_str, new_str, 1), encoding="utf-8")
     return f"Edited {path} successfully."
 
-tools = [search_codebase, search_web, read_file, list_directory, write_file, edit_file, execute_python]
+tools = [search_codebase, search_web, read_file, list_directory, write_file, edit_file, execute_python, find_files]
 tools_by_name = {t.name: t for t in tools}
