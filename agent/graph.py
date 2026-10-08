@@ -51,19 +51,19 @@ SYSTEM_PROMPT = """You are a coding assistant and research agent with 7 tools:
 - edit_file(path, old_str, new_str, codebase_path): replace text in a file
 - execute_python(code): run a short, self-contained Python snippet in an isolated
   sandbox (no network, no access to project files)
+- find_files(pattern, codebase_path): find files by NAME anywhere in the codebase
 
 Only search_codebase and search_web take a 'query' parameter. The other
 tools do NOT have a 'query' field - do not invent one. If the user asks to
 create or write a file, call write_file with 'path' and 'content'.
 
 Paths are relative to the codebase root. If a file is not found at the root,
-use list_directory to locate it.
+use find_files to locate it by name (search_codebase searches code CONTENT, never file names).
 
 Never claim that you created, edited or ran something unless a tool result in
 this conversation confirms it. If you did not call the tool, you did not do it.
 
-Long tool output is cut and ends with "[output truncated ...]". If you need a
-part that was cut, use search_codebase to find it.
+Long tool output is cut and ends with a note. For files, call read_file again with the offset it gives. If you only read part of a file, say so.
 
 If a required tool parameter is missing from the user's question, ask the
 user to clarify BEFORE calling the tool. Do not guess or invent parameter
@@ -83,6 +83,7 @@ FINALIZER_PROMPT = (
     "If any step was not completed, say so clearly. "
     "If the user rejected an action, say it was not done and ask how they want to proceed. "
     "Reply in plain text; do not call tools."
+    "If a tool result was truncated or partial, say the answer is based on partial content."
 )
 
 REJECTED_TEXT = (
@@ -270,7 +271,7 @@ def run_tool(name: str, args: dict) -> str:
         output = f"Tool error: {error}"
     if len(output) > MAX_TOOL_CHARS:
         output = (output[:MAX_TOOL_CHARS]
-                  + f"\n[output truncated: {len(output) - MAX_TOOL_CHARS} more characters]")
+                  + f"\n[output truncated ... use read_file with offset/limit]")
     return f"<tool_result>\n{output}\n</tool_result>"
 
 
@@ -320,7 +321,7 @@ def route_after_observe(state: AgentState) -> str:
     if state["tool_rounds"] >= MAX_ROUNDS_PER_STEP:
         print(f"WARNING: step {state['current_step'] + 1} hit the "
               f"{MAX_ROUNDS_PER_STEP}-round cap, moving on (step may be incomplete)")
-        return "advance_step"
+        return "finalizer"
     return "executor"
 
 

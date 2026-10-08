@@ -3,6 +3,7 @@ import chromadb
 import difflib
 import os
 import fnmatch
+import hashlib
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from tavily import TavilyClient
@@ -10,6 +11,7 @@ from langchain_core.tools import tool
 from agent.docker_tool import execute_python
 
 CHROMA_PATH = "./chroma_db"
+READ_CHAR_BUDGET = 5500
 embedding_fn = DefaultEmbeddingFunction()
 client = chromadb.PersistentClient(path=CHROMA_PATH)
 tavily_client = TavilyClient()
@@ -18,7 +20,9 @@ _indexed_paths = set()
 
 DENIED_NAMES = {".env", "chroma_db", ".git", ".venv"}
 
-SKIP_DIRS = {".venv"}
+SKIP_DIRS = DENIED_NAMES | {"__pycache__", "node_modules", "venv", "site-packages", "dist", "build"}
+
+SUFFIXES = (".py", ".md", ".toml", ".json", ".yaml", ".yml", ".txt", ".ini", ".cfg")
 
 def suggest_paths(base: Path, relative_path: str, limit: int = 5) -> list[str]:
     wanted = Path(relative_path).name.lower()
@@ -31,32 +35,36 @@ def suggest_paths(base: Path, relative_path: str, limit: int = 5) -> list[str]:
     close = difflib.get_close_matches(wanted, names, n=limit, cutoff=0.6)
     return [p for key in close for p in names[key]][:limit]
 
+def collection_for(codebase_path: str):
+    name = "cb_" + hashlib.sha1(codebase_path.encode()).hexdigest()[:12]
+    return client.get_or_create_collection(name=name, embedding_function=embedding_fn)
+
 def index_codebase(codebase_path: str) -> None:
-    """Chunk every source file in codebase_path and store embeddings in Chroma.
-    Only runs once per path (cached in _indexed_paths)."""
     if codebase_path in _indexed_paths:
         return
-
-    collection = client.get_or_create_collection(
-        name="codebase", embedding_function=embedding_fn
-    )
+    collection = collection_for(codebase_path)
     splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-
     documents, metadatas, ids = [], [], []
-    chunk_id = 0
-    for file_path in Path(codebase_path).rglob("*.py"):
-        text = file_path.read_text(encoding="utf-8", errors="ignore")
-        chunks = splitter.split_text(text)
-        for chunk in chunks:
-            documents.append(chunk)
-            metadatas.append({"source": str(file_path)})
-            ids.append(f"chunk_{chunk_id}")
-            chunk_id += 1
-
-    if documents:
-        collection.add(documents=documents, metadatas=metadatas, ids=ids)
+    root = Path(codebase_path)
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        for name in filenames:
+            file_path = Path(dirpath) / name
+            if not name.endswith(SUFFIXES) or file_path.stat().st_size > 200_000:
+                continue
+            rel = str(file_path.relative_to(root))
+            text = file_path.read_text(encoding="utf-8", errors="ignore")
+            for i, chunk in enumerate(splitter.split_text(text)):
+                documents.append(chunk)
+                metadatas.append({"source": rel})
+                ids.append(f"{rel}:{i}")
+    print(f"Indexing {len(documents)} chunks...")
+    for start in range(0, len(documents), 200):
+        end = start + 200
+        collection.upsert(documents=documents[start:end],
+                          metadatas=metadatas[start:end], ids=ids[start:end])
     _indexed_paths.add(codebase_path)
-
+    
 def resolve_safe_path(codebase_path: str, relative_path: str) -> Path:
     """Resolve relative_path against codebase_path and reject anything
     that escapes it or touches a denied name."""
@@ -123,12 +131,14 @@ def find_files(pattern: str, codebase_path: str) -> str:
     return "\n".join(matches) or f"No file matches '{pattern}'."
 
 @tool
-def read_file(path: str, codebase_path: str) -> str:
-    """Read the contents of a file inside the codebase.
+def read_file(path: str, codebase_path: str, offset: int = 0, limit: int = 200) -> str:
+    """Read a file inside the codebase, a window of lines at a time.
 
     Args:
         path: file path relative to the codebase root
         codebase_path: root directory of the codebase being inspected
+        offset: first line to read, 0-based (use it to continue a long file)
+        limit: maximum number of lines to return
     """
     try:
         safe_path = resolve_safe_path(codebase_path, path)
@@ -136,12 +146,25 @@ def read_file(path: str, codebase_path: str) -> str:
         return str(e)
 
     if not safe_path.exists():
-        return f"File not found: {path}. Use list_directory to find the correct path."
+        hints = suggest_paths(Path(codebase_path).resolve(), path)
+        extra = f" Did you mean: {', '.join(hints)}?" if hints else ""
+        return f"File not found: {path}.{extra}"
     if not safe_path.is_file():
         return f"Not a file: {path}"
 
-    return safe_path.read_text(encoding="utf-8", errors="ignore")
-
+    lines = safe_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    out, size, end = [], 0, offset
+    for line in lines[offset:offset + limit]:
+        if out and size + len(line) + 1 > READ_CHAR_BUDGET:
+            break
+        out.append(line)
+        size += len(line) + 1
+        end += 1
+    text = "\n".join(out)
+    if end < len(lines):
+        text += (f"\n[showing lines {offset + 1}-{end} of {len(lines)}; "
+                 f"call read_file again with offset={end} to continue]")
+    return text
 
 @tool
 def list_directory(path: str, codebase_path: str) -> str:
