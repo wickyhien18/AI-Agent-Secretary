@@ -66,6 +66,7 @@ def main() -> None:
                         "plan": [],
                         "current_step": 0,
                         "tool_rounds": 0,
+                        "partial_reads": {},
                     },
                     config=config,
                 )

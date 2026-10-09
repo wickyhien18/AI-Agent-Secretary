@@ -1,5 +1,6 @@
 import importlib
 import os
+import re
 import time
 import tomllib
 from pathlib import Path
@@ -21,6 +22,7 @@ MAX_ROUNDS_PER_STEP = 5
 MAX_TOOL_CHARS = 6000
 KEEP_TURNS = 3
 MAX_WAIT = 30
+PARTIAL_RE = re.compile(r"call read_file again with offset=(\d+)")
 
 NEEDS_CODEBASE_PATH = {
     "search_codebase", "read_file", "list_directory", "write_file", "edit_file", "find_files"
@@ -41,11 +43,11 @@ PROVIDERS = {
     "ollama": ("langchain_ollama", "ChatOllama"),
 }
 
-SYSTEM_PROMPT = """You are a coding assistant and research agent with 7 tools:
+SYSTEM_PROMPT = """You are a coding assistant and research agent with 8 tools:
 
 - search_codebase(query, codebase_path): semantic search inside the code
 - search_web(query): search the internet
-- read_file(path, codebase_path): read a file's contents
+- read_file(path, codebase_path, offset=0, limit=200): read a file in windows of lines
 - list_directory(path, codebase_path): list files in a directory
 - write_file(path, content, codebase_path): create or overwrite a file
 - edit_file(path, old_str, new_str, codebase_path): replace text in a file
@@ -63,7 +65,9 @@ use find_files to locate it by name (search_codebase searches code CONTENT, neve
 Never claim that you created, edited or ran something unless a tool result in
 this conversation confirms it. If you did not call the tool, you did not do it.
 
-Long tool output is cut and ends with a note. For files, call read_file again with the offset it gives. If you only read part of a file, say so.
+Long files are returned in windows. If the output ends with "[showing lines ...",
+call read_file again with the offset it gives until you have the whole file.
+Never write a summary of a file you have only partly read.
 
 If a required tool parameter is missing from the user's question, ask the
 user to clarify BEFORE calling the tool. Do not guess or invent parameter
@@ -305,9 +309,13 @@ def run_tool(name: str, args: dict) -> str:
 def act(state: AgentState) -> dict:
     results = []
     changes = 0
+    partial = dict(state.get("partial_reads") or {})
     for call in state["messages"][-1].tool_calls:
         name, args = call["name"], dict(call["args"])
         result = check_call(name, args, state)
+        if result is None and name == "write_file" and partial:
+            files = ", ".join(f"{p} (continue at offset={o})" for p, o in partial.items())
+            result = f"ERROR: you have only read part of: {files}. Read the rest before writing."
         debug(f"tool_call: {name} args={args}")
         if result is None and name in NEEDS_APPROVAL:
             changes += 1
@@ -318,9 +326,16 @@ def act(state: AgentState) -> dict:
                 result = REJECTED_TEXT
         if result is None:
             result = run_tool(name, args)
-            debug(f"result [{len(result)} chars]: {result[:200]!r}")
+            if name == "read_file":
+                key = args.get("path", "")
+                match = PARTIAL_RE.search(result)
+                if match:
+                    partial[key] = int(match.group(1))
+                else:
+                    partial.pop(key, None)
+            debug(f"result [{len(result)} chars]: {result[:150]!r} ... {result[-150:]!r}")
         results.append(ToolMessage(content=result, tool_call_id=call["id"]))
-    return {"messages": results}
+    return {"messages": results, "partial_reads": partial}
 
 
 def observe(state: AgentState) -> dict:

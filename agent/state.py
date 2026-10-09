@@ -26,3 +26,4 @@ class AgentState(TypedDict):
     plan: list[dict]        # ordered list of steps, written once by planner
     current_step: int      # index into plan, advanced by check_progress
     tool_rounds: int
+    partial_reads: dict     # path -> offset where an unfinished read_file stopped
