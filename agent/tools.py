@@ -35,14 +35,19 @@ def suggest_paths(base: Path, relative_path: str, limit: int = 5) -> list[str]:
     close = difflib.get_close_matches(wanted, names, n=limit, cutoff=0.6)
     return [p for key in close for p in names[key]][:limit]
 
-def collection_for(codebase_path: str):
+def collection_for(codebase_path: str, fresh: bool = False):
     name = "cb_" + hashlib.sha1(codebase_path.encode()).hexdigest()[:12]
+    if fresh:
+        try:
+            client.delete_collection(name)
+        except Exception:
+            pass
     return client.get_or_create_collection(name=name, embedding_function=embedding_fn)
 
 def index_codebase(codebase_path: str) -> None:
     if codebase_path in _indexed_paths:
         return
-    collection = collection_for(codebase_path)
+    collection = collection_for(codebase_path, fresh=True)
     splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
     documents, metadatas, ids = [], [], []
     root = Path(codebase_path)

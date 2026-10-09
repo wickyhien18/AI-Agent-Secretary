@@ -237,6 +237,9 @@ def planner(state: AgentState) -> dict:
         "goal, at most 3 steps in total. Never make a separate step for thinking, "
         "summarising or generating text: fold it into the step that uses it. "
         "Example: 'read X then write a summary of it to Y' is exactly 2 steps. "
+        "A step states a goal; never copy the user's words as the reply. "
+        "For a greeting, thanks, or any question you can answer without tools, "
+        "use exactly one step: 'Answer the user helpfully, in the user's own language.' "
         "For every step say whether it needs a tool. "
         f"Request: {question}"
     )
