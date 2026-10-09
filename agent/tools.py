@@ -64,7 +64,7 @@ def index_codebase(codebase_path: str) -> None:
         collection.upsert(documents=documents[start:end],
                           metadatas=metadatas[start:end], ids=ids[start:end])
     _indexed_paths.add(codebase_path)
-    
+
 def resolve_safe_path(codebase_path: str, relative_path: str) -> Path:
     """Resolve relative_path against codebase_path and reject anything
     that escapes it or touches a denied name."""
@@ -81,6 +81,9 @@ def resolve_safe_path(codebase_path: str, relative_path: str) -> Path:
         raise ValueError(f"Access to '{relative_path}' is denied.")
 
     return candidate
+
+def err(message: str) -> str:
+    return f"ERROR: {message}"
 
 @tool
 def search_codebase(query: str, codebase_path: str) -> str:
@@ -128,7 +131,11 @@ def find_files(pattern: str, codebase_path: str) -> str:
                 matches.append(str((Path(dirpath) / name).relative_to(base)))
                 if len(matches) >= 50:
                     return "\n".join(matches) + "\n[more results omitted]"
-    return "\n".join(matches) or f"No file matches '{pattern}'."
+    if matches:
+        return "\n".join(matches)
+    hints = suggest_paths(base, pattern.replace("*", ""))
+    extra = f" Did you mean: {', '.join(hints)}?" if hints else ""
+    return err(f"No file matches '{pattern}'.{extra}")
 
 @tool
 def read_file(path: str, codebase_path: str, offset: int = 0, limit: int = 200) -> str:
@@ -143,14 +150,14 @@ def read_file(path: str, codebase_path: str, offset: int = 0, limit: int = 200) 
     try:
         safe_path = resolve_safe_path(codebase_path, path)
     except ValueError as e:
-        return str(e)
+        return err(str(e))
 
     if not safe_path.exists():
         hints = suggest_paths(Path(codebase_path).resolve(), path)
         extra = f" Did you mean: {', '.join(hints)}?" if hints else ""
-        return f"File not found: {path}.{extra}"
+        return err(f"File not found: {path}.{extra}")
     if not safe_path.is_file():
-        return f"Not a file: {path}"
+        return err(f"Not a file: {path}")
 
     lines = safe_path.read_text(encoding="utf-8", errors="ignore").splitlines()
     out, size, end = [], 0, offset
@@ -177,12 +184,12 @@ def list_directory(path: str, codebase_path: str) -> str:
     try:
         safe_path = resolve_safe_path(codebase_path, path)
     except ValueError as e:
-        return str(e)
+        return err(str(e))
 
     if not safe_path.exists():
-        return f"Directory not found: {path}"
+        return err(f"Directory not found: {path}")
     if not safe_path.is_dir():
-        return f"Not a directory: {path}"
+        return err(f"Not a directory: {path}")
 
     entries = sorted(
         p.name + ("/" if p.is_dir() else "")
@@ -203,7 +210,7 @@ def write_file(path: str, content: str, codebase_path: str) -> str:
     try:
         safe_path = resolve_safe_path(codebase_path, path)
     except ValueError as e:
-        return str(e)
+        return err(str(e))
 
     safe_path.parent.mkdir(parents=True, exist_ok=True)
     safe_path.write_text(content, encoding="utf-8")
@@ -225,18 +232,18 @@ def edit_file(path: str, old_str: str, new_str: str, codebase_path: str) -> str:
     try:
         safe_path = resolve_safe_path(codebase_path, path)
     except ValueError as e:
-        return str(e)
+        return err(str(e))
 
     if not safe_path.exists():
-        return f"File not found: {path}"
+        return err(f"File not found: {path}")
 
     text = safe_path.read_text(encoding="utf-8", errors="ignore")
     count = text.count(old_str)
 
     if count == 0:
-        return f"old_str not found in {path}. No changes made."
+        return err(f"old_str not found in {path}. No changes made.")
     if count > 1:
-        return f"old_str appears {count} times in {path} — must be unique. No changes made."
+        return err(f"old_str appears {count} times in {path} — must be unique. No changes made.")
 
     safe_path.write_text(text.replace(old_str, new_str, 1), encoding="utf-8")
     return f"Edited {path} successfully."

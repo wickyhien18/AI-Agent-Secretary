@@ -82,6 +82,8 @@ FINALIZER_PROMPT = (
     "if there is no such confirmation, say it was not done. "
     "If any step was not completed, say so clearly. "
     "If the user rejected an action, say it was not done and ask how they want to proceed. "
+    "If the last tool result starts with ERROR:, report that failure; never substitute "
+    "another file or reuse results from earlier requests. "
     "Reply in plain text; do not call tools."
     "If a tool result was truncated or partial, say the answer is based on partial content."
 )
@@ -154,10 +156,23 @@ def usage_summary() -> str:
             f"output tokens: {USAGE['output']}")
 
 
-def with_system_prompt(messages: list) -> list:
-    humans = [i for i, m in enumerate(messages) if m.type == "human"]
-    if len(humans) > KEEP_TURNS:
-        messages = messages[humans[-KEEP_TURNS]:]
+def turn_start(messages) -> int:
+    return max((i for i, m in enumerate(messages) if m.type == "human"), default=0)
+
+
+def with_system_prompt(messages: list, only_current_turn: bool = False) -> list:
+    if only_current_turn:
+        messages = messages[turn_start(messages):]
+    else:
+        humans = [i for i, m in enumerate(messages) if m.type == "human"]
+        if len(humans) > KEEP_TURNS:
+            messages = messages[humans[-KEEP_TURNS]:]
+        last = turn_start(messages)
+        messages = [
+            ToolMessage(content="[earlier tool output omitted]", tool_call_id=m.tool_call_id)
+            if i < last and m.type == "tool" else m
+            for i, m in enumerate(messages)
+        ]
     return [SystemMessage(content=SYSTEM_PROMPT)] + messages
 
 
@@ -223,7 +238,7 @@ def executor(state: AgentState) -> dict:
     plan = state["plan"]
     step = plan[idx]
     done_text = "\n".join(f"- {s['text']}" for s in plan[:idx]) or "(none)"
-    force_tool = step["needs_tool"] and state["tool_rounds"] == 0
+    force_tool = False
     debug(f"executor: step {idx + 1}/{len(plan)} -> {step['text']} (forced tool: {force_tool})")
 
     step_prompt = HumanMessage(content=(
@@ -244,9 +259,21 @@ def executor(state: AgentState) -> dict:
     return {"messages": [response]}
 
 
+def last_tool_failed(state: AgentState) -> bool:
+    for message in reversed(state["messages"]):
+        if message.type == "human":
+            return False
+        if message.type == "tool":
+            body = message.content.removeprefix("<tool_result>\n")
+            return body.startswith("ERROR:")
+    return False
+
+
 def route_after_executor(state: AgentState) -> str:
     if getattr(state["messages"][-1], "tool_calls", None):
         return "act"
+    if last_tool_failed(state):
+        return "finalizer"
     return "advance_step"
 
 
@@ -268,7 +295,7 @@ def run_tool(name: str, args: dict) -> str:
     try:
         output = str(tools_by_name[name].invoke(args))
     except Exception as error:
-        output = f"Tool error: {error}"
+        output = f"ERROR: {error}"
     if len(output) > MAX_TOOL_CHARS:
         output = (output[:MAX_TOOL_CHARS]
                   + f"\n[output truncated ... use read_file with offset/limit]")
@@ -320,7 +347,7 @@ def route_after_observe(state: AgentState) -> str:
         return "finalizer"
     if state["tool_rounds"] >= MAX_ROUNDS_PER_STEP:
         print(f"WARNING: step {state['current_step'] + 1} hit the "
-              f"{MAX_ROUNDS_PER_STEP}-round cap, moving on (step may be incomplete)")
+              f"{MAX_ROUNDS_PER_STEP}-round cap, stopping")
         return "finalizer"
     return "executor"
 
@@ -336,7 +363,8 @@ def route_after_advance(state: AgentState) -> str:
 
 
 def finalizer(state: AgentState) -> dict:
-    messages = with_system_prompt(state["messages"]) + [HumanMessage(content=FINALIZER_PROMPT)]
+    messages = (with_system_prompt(state["messages"], only_current_turn=True)
+                + [HumanMessage(content=FINALIZER_PROMPT)])
     response = call_llm(messages, "The work is finished, but I could not write the summary.")
     if getattr(response, "tool_calls", None):
         response = AIMessage(content=response.content or "The work is finished.")
@@ -358,7 +386,7 @@ def build_graph():
     graph.add_edge("planner", "executor")
     graph.add_conditional_edges(
         "executor", route_after_executor,
-        {"act": "act", "advance_step": "advance_step"},
+        {"act": "act", "advance_step": "advance_step", "finalizer": "finalizer"},
     )
     graph.add_edge("act", "observe")
     graph.add_conditional_edges(
