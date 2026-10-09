@@ -87,7 +87,13 @@ def err(message: str) -> str:
 
 @tool
 def search_codebase(query: str, codebase_path: str) -> str:
-    """Search for relevant code in the specified codebase."""
+    """Semantic search over the CONTENT of source files, never over file names.
+    Use it to find where something is implemented. To locate a file by name, use find_files.
+
+    Args:
+        query: what to look for, described in words
+        codebase_path: root directory of the codebase being inspected
+    """
     index_codebase(codebase_path)
     collection = client.get_or_create_collection(
         name="codebase", embedding_function=embedding_fn
