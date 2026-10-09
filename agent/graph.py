@@ -22,6 +22,7 @@ MAX_ROUNDS_PER_STEP = 5
 MAX_TOOL_CHARS = 6000
 KEEP_TURNS = 3
 MAX_WAIT = 30
+MAX_PLAN_STEPS = 3
 PARTIAL_RE = re.compile(r"call read_file again with offset=(\d+)")
 
 NEEDS_CODEBASE_PATH = {
@@ -152,7 +153,7 @@ def use_model(alias=None) -> str:
     llm = chat_class(model=settings.pop("model"), **settings)
     llm_with_tools = llm.bind_tools(tools)
     llm_forced = llm.bind_tools(tools, tool_choice="any")
-    planner_llm = llm.with_structured_output(Plan)
+    planner_llm = llm.with_structured_output(Plan, include_raw=True)
     return alias
 
 
@@ -221,26 +222,42 @@ def call_llm(messages: list, fallback_text: str, force_tool: bool = False) -> AI
     return AIMessage(content=fallback_text)
 
 
+def tidy_plan(steps: list[dict]) -> list[dict]:
+    """Drop pure-thinking steps (they get done inside the next tool step) and cap the length."""
+    if len(steps) > 1:
+        steps = [s for s in steps if s["needs_tool"]] or steps[:1]
+    return steps[:MAX_PLAN_STEPS]
+
+
 def planner(state: AgentState) -> dict:
     USAGE.update(calls=0, input=0, output=0)
     question = state["messages"][-1].content
+    prompt = (
+        "Break this request into the fewest steps needed: 1 step if there is a single "
+        "goal, at most 3 steps in total. Never make a separate step for thinking, "
+        "summarising or generating text: fold it into the step that uses it. "
+        "Example: 'read X then write a summary of it to Y' is exactly 2 steps. "
+        "For every step say whether it needs a tool. "
+        f"Request: {question}"
+    )
     steps = []
-    try:
-        result = invoke_with_retry(
-            planner_llm,
-            "Break this request into the fewest steps needed: 1 step if there is a single "
-            "goal, at most 3 steps in total. Never make a separate step for thinking, "
-            "summarising or generating text: fold it into the step that uses it. "
-            "Example: 'read X then write a summary of it to Y' is exactly 2 steps. "
-            "For every step say whether it needs a tool. "
-            f"Request: {question}",
-        )
-        steps = [{"text": s.text, "needs_tool": s.needs_tool} for s in result.steps]
-    except RateLimitStop:
-        raise
-    except Exception as error:
-        debug(f"planner failed, using a single-step plan: {error!r}")
-    steps = steps or [{"text": question, "needs_tool": False}]
+    for attempt in range(2):
+        try:
+            out = invoke_with_retry(planner_llm, prompt)
+            usage = getattr(out.get("raw"), "usage_metadata", None) or {}
+            USAGE["calls"] += 1
+            USAGE["input"] += usage.get("input_tokens", 0)
+            USAGE["output"] += usage.get("output_tokens", 0)
+            parsed = out.get("parsed")
+            if parsed is not None:
+                steps = [{"text": s.text, "needs_tool": s.needs_tool} for s in parsed.steps]
+                break
+            debug(f"planner parse error: {out.get('parsing_error')!r}")
+        except RateLimitStop:
+            raise
+        except Exception as error:
+            debug(f"planner attempt {attempt + 1} failed: {error!r}")
+    steps = tidy_plan(steps) or [{"text": question, "needs_tool": True}]
     debug("plan: " + " | ".join(f"{i + 1}. {s['text']}" for i, s in enumerate(steps)))
     return {"plan": steps, "current_step": 0, "tool_rounds": 0}
 
@@ -385,7 +402,8 @@ def advance_step(state: AgentState) -> dict:
 
 def route_after_advance(state: AgentState) -> str:
     if state["current_step"] >= len(state["plan"]):
-        return END if len(state["plan"]) == 1 else "finalizer"
+        used_tools = any(m.type == "tool" for m in state["messages"][turn_start(state["messages"]):])
+        return "finalizer" if used_tools else END
     return "executor"
 
 
