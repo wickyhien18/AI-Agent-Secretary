@@ -5,7 +5,7 @@ import os
 import fnmatch
 import hashlib
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_text_splitters import Language, RecursiveCharacterTextSplitter
 from tavily import TavilyClient
 from langchain_core.tools import tool
 from agent.docker_tool import execute_python
@@ -51,7 +51,10 @@ def index_codebase(codebase_path: str) -> None:
     if codebase_path in _indexed_paths:
         return
     collection = collection_for(codebase_path, fresh=True)
-    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    py_splitter = RecursiveCharacterTextSplitter.from_language(
+        Language.PYTHON, chunk_size=800, chunk_overlap=100, add_start_index=True)
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=800, chunk_overlap=100, add_start_index=True)
     documents, metadatas, ids = [], [], []
     root = Path(codebase_path)
     for dirpath, dirnames, filenames in os.walk(root):
@@ -62,9 +65,11 @@ def index_codebase(codebase_path: str) -> None:
                 continue
             rel = str(file_path.relative_to(root))
             text = file_path.read_text(encoding="utf-8", errors="ignore")
-            for i, chunk in enumerate(splitter.split_text(text)):
-                documents.append(chunk)
-                metadatas.append({"source": rel})
+            splitter = py_splitter if name.endswith(".py") else text_splitter
+            for i, doc in enumerate(splitter.create_documents([text])):
+                line = text.count("\n", 0, doc.metadata["start_index"])
+                documents.append(doc.page_content)
+                metadatas.append({"source": rel, "line": line})
                 ids.append(f"{rel}:{i}")
     print(f"Indexing {len(documents)} chunks...")
     for start in range(0, len(documents), 200):
@@ -101,14 +106,14 @@ def search_codebase(query: str, codebase_path: str) -> str:
     """
     index_codebase(codebase_path)
     collection = collection_for(codebase_path)
-    results = collection.query(query_texts=[query], n_results=3)
+    results = collection.query(query_texts=[query], n_results=5)
 
     if not results["documents"][0]:
         return "No relevant code found."
 
     output = []
     for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
-        output.append(f"[{meta['source']}]\n{doc}")
+        output.append(f"[{meta['source']} | read_file offset={meta['line']}]\n{doc}")
     return "\n---\n".join(output)
 
 @tool
