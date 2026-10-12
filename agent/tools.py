@@ -35,6 +35,9 @@ def suggest_paths(base: Path, relative_path: str, limit: int = 5) -> list[str]:
     close = difflib.get_close_matches(wanted, names, n=limit, cutoff=0.6)
     return [p for key in close for p in names[key]][:limit]
 
+def err(message: str) -> str:
+    return f"ERROR: {message}"
+
 def collection_for(codebase_path: str, fresh: bool = False):
     name = "cb_" + hashlib.sha1(codebase_path.encode()).hexdigest()[:12]
     if fresh:
@@ -87,9 +90,6 @@ def resolve_safe_path(codebase_path: str, relative_path: str) -> Path:
 
     return candidate
 
-def err(message: str) -> str:
-    return f"ERROR: {message}"
-
 @tool
 def search_codebase(query: str, codebase_path: str) -> str:
     """Semantic search over the CONTENT of source files, never over file names.
@@ -100,9 +100,7 @@ def search_codebase(query: str, codebase_path: str) -> str:
         codebase_path: root directory of the codebase being inspected
     """
     index_codebase(codebase_path)
-    collection = client.get_or_create_collection(
-        name="codebase", embedding_function=embedding_fn
-    )
+    collection = collection_for(codebase_path)
     results = collection.query(query_texts=[query], n_results=3)
 
     if not results["documents"][0]:
