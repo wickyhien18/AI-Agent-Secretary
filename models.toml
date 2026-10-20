@@ -3,6 +3,7 @@ default = "gpt-oss"
 [models.gpt-oss]
 provider = "groq"
 model = "openai/gpt-oss-20b"
+max_retries = 0
 
 [models.qwen]
 provider = "groq"
